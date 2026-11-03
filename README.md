@@ -55,6 +55,7 @@ Local-wireless multiplayer through Eden rooms is new in v1.000.000 and experimen
 - **Your language** - the launcher follows the language the PS5 is set to (29 languages; English otherwise).
 - **Accessibility** - larger text, high contrast and reduced motion, in **Settings > Accessibility**.
 - **Save data in and out** - import a game's save from a folder or from a Ryujinx data folder, and export a copy (Triangle in the Library, then **Save data**).
+- **NUP packages** - a `.nup` (the nup-meow format) in `roms/` is listed with its own name and icon, and holds a base game with its updates in one compressed file. The first start unpacks it (with a progress screen, checking every file's SHA-256) into `.nup-cache/` in the game files folder; later starts are immediate. The newest two unpackings are kept. See [NUP](#nup-packages).
 - **Game updates and DLC** - put update and DLC files (NSP or XCI) in the `updates` folder next to `roms`. They apply when the game starts, and each game's details show the update version and DLC count.
 - **Download sources** - the games on servers in your network, such as a [RomM](https://github.com/rommapp/romm) server, appear in the Library next to the ones on the console. A game is downloaded when you play it, or ahead of time through a download queue, and then runs from the console like any other: nothing is streamed. Downloads need an FTP server running on the console; see [Download sources](#download-sources).
 - **Save sync** - each profile can keep its save data on a server, such as a [RomM](https://github.com/rommapp/romm) server, as Steam does: it is synced before a game starts and after it ended, and when it changed on two devices you choose which one stays. A profile is paired with its server by a QR code, no typing. See [Save sync](#save-sync).
@@ -114,6 +115,12 @@ Only these subfolders matter; the folder itself can have any name and location.
 Extracted games can also be copied as `roms/<game>/exefs/main` with `romfs/` beside `exefs/`, or as `roms/<game>/base/exefs/main` with updates in `roms/<game>/updates/<decimal version>/`. A complete extracted dump kept entirely in `roms/<game>/updates/<decimal version>/` is supported too: when the base executable is absent, the Library finds the newest version containing `exefs/main`. Each game appears once in the Library. For the versioned layout, newer update files override older ones in both `exefs/` and `romfs/`; files missing from updates are read from the base. Keep the extracted folders together when copying the game. Use binary mode for FTP transfers to preserve executable and asset bytes.
 
 The folder browser shows how many keys, firmware files, and games each folder holds, so you can check a folder before selecting it. Moving your files later only needs a new selection in Settings; saved settings, covers, and recently played games carry over.
+
+### NUP packages
+
+A `.nup` file (`roms/Game.nup`, or in an NFS share or a USB `games` folder like any game) needs no keys. Its name, publisher and icon come from the package's metadata. The base game and every update it holds are unpacked on the first start into `<game files folder>/.nup-cache/<id>/`, in the layout of an extracted dump (`base/`, `updates/<decimal version>/`), so updates apply as they do for extracted games; a file an update leaves unchanged is not written twice. Keep free space for the whole game on that drive. Only the newest two unpackings are kept. Cancel (Circle) on the progress screen ends it and removes the partial folder.
+
+Limits: DLC packages inside a `.nup` are counted but not applied (the core takes DLC from NSP/XCI files in `updates/`).
 
 ### App data
 

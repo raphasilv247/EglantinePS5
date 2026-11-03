@@ -147,7 +147,7 @@ inline bool ValidRomFilename(std::string_view name) {
         if (c < 32 || c == 127 || c == '/' || c == '\\') return false;
     std::string extension(name.substr(name.size() - 4));
     for (char& c : extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return extension == ".nsp" || extension == ".xci" || extension == ".dir";
+    return extension == ".nsp" || extension == ".xci" || extension == ".nup" || extension == ".dir";
 }
 
 inline std::string SettingsFile() { return ConfigFile("eglantineps5.json"); }

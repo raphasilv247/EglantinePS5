@@ -1,4 +1,5 @@
 #include "extracted_game.h"
+#include "nup.h"
 #include "game_name.h"
 #include "metadata_bridge.h"
 #include "assets_dir.h"
@@ -196,6 +197,15 @@ uint64_t eden_game_title_id(const char* rom_path) {
         const std::string npdm = std::string{named.substr(0, named.size() - 4)} + "main.npdm";
         return Eden::ExtractedTitleID(npdm);
     }
+    // A .nup carries its title ID in the package record: no keys, nothing unpacked.
+    if (Eden::Nup::IsNupPath(rom_path)) {
+        try {
+            return Eden::Nup::ReadInfo(rom_path).title_id;
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "[EglantinePS5] nup: %s\n", error.what());
+            return 0;
+        }
+    }
     FileSys::RealVfsFilesystem vfs;
     const auto file = vfs.OpenFile(rom_path, FileSys::OpenMode::Read);
     if (!file) return 0;
@@ -218,6 +228,24 @@ int eden_extract_game_metadata(const char* rom_path, const char* keys_dir,
                                size_t title_capacity) {
     if (!rom_path || !keys_dir || !cover_tga_path || !title || title_capacity == 0) return 0;
     title[0] = '\0';
+    if (Eden::Nup::IsNupPath(rom_path)) {
+        // Name and icon are in the package's metadata block (SPEC 5): no keys, no NCA.
+        try {
+            const Eden::Nup::Info info = Eden::Nup::ReadInfo(rom_path);
+            GameLanguages()[rom_path] = info.languages;
+            int found = 0;
+            if (!info.name.empty() && Eden::UsableName(info.name.c_str())) {
+                std::snprintf(title, title_capacity, "%s", Eden::PlainName(info.name.c_str()).c_str());
+                found |= EDEN_METADATA_TITLE;
+            }
+            if (!info.icon.empty() && WriteTgaBytes(info.icon.data(), info.icon.size(), cover_tga_path, 4096))
+                found |= EDEN_METADATA_COVER;
+            return found;
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "[EglantinePS5] nup: %s\n", error.what());
+            return 0;
+        }
+    }
     Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, keys_dir);
     FileSys::RealVfsFilesystem vfs;
     const auto file = vfs.OpenFile(rom_path, FileSys::OpenMode::Read);
@@ -244,6 +272,13 @@ int eden_extract_game_metadata(const char* rom_path, const char* keys_dir,
 uint32_t eden_game_supported_languages(const char* rom_path, const char* keys_dir) {
     if (!rom_path || !keys_dir) return 0;
     if (const auto known = GameLanguages().find(rom_path); known != GameLanguages().end()) return known->second;
+    if (Eden::Nup::IsNupPath(rom_path)) {
+        try {
+            return GameLanguages()[rom_path] = Eden::Nup::ReadInfo(rom_path).languages;
+        } catch (const std::exception&) {
+            return 0;
+        }
+    }
     try {
         Common::FS::SetEdenPath(Common::FS::EdenPath::KeysDir, keys_dir);
         FileSys::RealVfsFilesystem vfs;

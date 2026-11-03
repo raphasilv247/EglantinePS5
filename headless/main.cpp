@@ -54,6 +54,7 @@
 #ifdef PS5_NATIVE
 #include "native_directory.h"
 #include "extracted_game.h"
+#include "nup.h"
 #include "cache_budget.h"
 #include "performance.h"
 #include "stall_watchdog.h"
@@ -530,7 +531,7 @@ int main(int argc, char** argv) {
             for (const auto& entry : Eden::ReadNativeDirectory(folder, rom_error)) {
                 const auto filename = entry.path().filename().string();
                 const auto extension = entry.path().extension();
-                if (extension != ".nsp" && extension != ".xci") continue;
+                if (extension != ".nsp" && extension != ".xci" && extension != ".nup") continue;
                 const auto path = folder + "/" + filename;
                 if (filename.find(development_id) != std::string::npos ||
                     eden_game_title_id(path.c_str()) == development_title) {
@@ -573,6 +574,12 @@ int main(int argc, char** argv) {
         launch_error.clear();
         if (!rooms.BeginGame()) throw std::runtime_error("Join a room successfully or leave it before starting a game.");
         SCOPE_EXIT { rooms.EndGame(); };
+        // A .nup is unpacked into the cache (the launcher did it with a progress screen; this is then a check)
+        // and the game starts from its exefs/main, like an extracted dump. A failure is shown as it was.
+        if (Eden::Nup::IsNupPath(selected_game)) {
+            Eden::BootTrace::Line("unpacking a NUP");
+            selected_game = Eden::Nup::EnsureExtracted(selected_game, Eden::AssetsPath(".nup-cache"));
+        }
 #ifdef EDEN_DEV_VULKAN
         Eden::Performance::vulkan_cost_enabled = std::filesystem::exists(Eden::AppFile("cost-run.txt"));
         const bool performance_run = std::filesystem::exists(Eden::AppFile("performance-run.txt"));

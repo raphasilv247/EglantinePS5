@@ -811,7 +811,10 @@ void Launcher::draw_prepare(Canvas &c, float open)
     cover(c, prepare_cover_, {kCenterX - art * 0.5f, kRingY - art * 0.5f, art, art}, 12.0f);
 
     centred(prepare_title_, 506.0f, 46.0f, theme::kHeading, theme::kTitle);
-    centred(tr("Reading the game's files from the server"), 560.0f, 32.0f, theme::kText24, theme::kValue);
+    // A .nup is unpacked here (eden_services.cpp), a game folder on a share is read.
+    const bool unpacking = prepare_file_.size() > 4 && prepare_file_.compare(prepare_file_.size() - 4, 4, ".nup") == 0;
+    centred(unpacking ? tr("Unpacking") : tr("Reading the game's files from the server"), 560.0f, 32.0f, theme::kText24,
+            theme::kValue);
 
     // The length is known when an earlier reading of this game wrote it down: the bar fills and the time left is
     // estimated from the pace so far. Otherwise a bar that goes back and forth, and what has been seen.

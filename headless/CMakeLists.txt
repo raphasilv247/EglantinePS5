@@ -2565,6 +2565,11 @@ else()
     add_executable(eden-settings-check "${EDEN_PORT_DIR}/preferences_check.cpp")
     target_link_libraries(eden-settings-check PRIVATE core)
     target_compile_options(eden-settings-check PRIVATE -UNDEBUG)
+    # The NUP reader (nup.h): unpacks a .nup made by nup-meow's tools/nup and compares it with its dump
+    # (tools/check-nup.py). zstd comes with core.
+    add_executable(eden-nup-check "${EDEN_PORT_DIR}/nup_check.cpp")
+    target_link_libraries(eden-nup-check PRIVATE core)
+    target_compile_options(eden-nup-check PRIVATE -fno-rtti -Wall -Wextra -Werror -Wno-unused-parameter)
     # So is the check of the cheat files' entries (patch_library.h).
     add_executable(eden-patch-library-check "${EDEN_PORT_DIR}/patch_library_check.cpp")
     target_compile_options(eden-patch-library-check PRIVATE -UNDEBUG)

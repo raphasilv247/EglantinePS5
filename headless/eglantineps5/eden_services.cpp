@@ -15,6 +15,7 @@
 #include "game_name.h"
 #include "native_directory.h"
 #include "extracted_game.h"
+#include "nup.h"
 #include "pe/core/strings.hpp"
 #include "radio_input.h"
 #include "remote/backends.h"
@@ -571,7 +572,12 @@ std::optional<std::int64_t> EdenServices::ask_seed(std::int64_t current, const s
     return Eden::RngSeedFromText(Common::UTF16ToUTF8(answer.text));
 }
 
+// Where the games of .nup files are unpacked: in the game files folder, which can be a big drive.
+static std::string NupCache() { return Eden::AssetsPath(".nup-cache"); }
+
 bool EdenServices::game_needs_prepare(const std::string& file) {
+    // A .nup is unpacked once (a few minutes for a big game); after that it starts at once.
+    if (Eden::Nup::IsNupPath(file)) return !Eden::Nup::IsReady(RomPath(file), NupCache());
     // Only a game on an NFS share is read first: a USB or NTFS disk answers at once.
     return IsFolderGame(file) && RomPath(file).rfind("/nfs/", 0) == 0;
 }
@@ -589,6 +595,19 @@ static std::string TotalFile(const std::string& root) {
 
 bool EdenServices::prepare_game(const std::string& file, const std::atomic<bool>& stop, std::atomic<unsigned>& folders,
                                 std::atomic<unsigned>& files, std::atomic<unsigned>& expected) {
+    if (Eden::Nup::IsNupPath(file)) {
+        const std::string nup = RomPath(file);
+        try {
+            (void)Eden::Nup::Materialize(nup, NupCache(), {&folders, &files, &expected, &stop});
+        } catch (const Eden::Nup::Cancelled&) {
+            return false;
+        } catch (const std::exception& error) {
+            // The game start tells the player (main.cpp), without unpacking it all over again.
+            Eden::Nup::RecordFailure(nup, error.what());
+            Eden::Report("nup", (file + ": " + error.what()).c_str());
+        }
+        return !stop;
+    }
     std::string root = RomPath(file); // <game>/exefs/main
     for (int up = 0; up < 2; ++up) {
         const auto slash = root.rfind('/');
@@ -1076,7 +1095,7 @@ std::vector<pe::ui::Game> EdenServices::games() {
         std::string format = file.substr(dot + 1);
         std::transform(format.begin(), format.end(), format.begin(),
                        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-        if (format != "NSP" && format != "XCI" && format != "DIR") continue;
+        if (format != "NSP" && format != "XCI" && format != "NUP" && format != "DIR") continue;
         const std::string path = RomPath(file);
         struct stat info {};
         if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) continue;
@@ -1445,7 +1464,7 @@ pe::ui::FolderInfo EdenServices::folder_info(const std::string& directory) {
     pe::ui::FolderInfo info;
     info.keys = Eden::FileExists(JoinPath(directory, "keys/prod.keys"));
     info.firmware = CountFiles(JoinPath(directory, "firmware"), {".nca"});
-    info.games = CountFiles(JoinPath(directory, "roms"), {".nsp", ".xci"});
+    info.games = CountFiles(JoinPath(directory, "roms"), {".nsp", ".xci", ".nup"});
     return info;
 }
 
