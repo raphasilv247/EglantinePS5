@@ -866,7 +866,7 @@ inline std::string Materialize(const std::string& nup, const std::string& cache_
     };
     std::vector<Job> jobs;
     std::set<std::string> folders;
-    std::uint64_t bytes = 0;
+    [[maybe_unused]] std::uint64_t bytes = 0;  // only the host build checks the free space
     std::uint64_t skipped = 0;
     std::map<std::string, std::pair<std::array<std::uint8_t, 32>, std::uint64_t>> below;  // path -> content so far
     for (const Layer& layer : layers) {
