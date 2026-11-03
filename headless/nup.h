@@ -8,10 +8,9 @@
 //                  add-ons) from its superblock and metadata blocks alone: a few KiB of reading, however
 //                  big the game is. The table of contents is not verified here.
 //   IsReady        whether the game has been unpacked already (reads only the 128-byte superblock).
-//   Materialize    unpacks the game once into the cache, in the layout of an extracted dump that the core
-//                  already loads (patch 0001: base/exefs, base/romfs, updates/<decimal version>/...), after
-//                  verifying the table of contents and every file's SHA-256. Files of an update that are
-//                  the same as the layer below are not written again: the core reads them from there.
+//   Materialize    unpacks the game once into the cache as a plain extracted dump (exefs/ and romfs/ at the
+//                  root, each path holding the newest version of the file: an update's file replaces the
+//                  base's), after verifying the table of contents and every file's SHA-256.
 //   EnsureExtracted  Materialize without progress, for the game start itself.
 //
 // The reader follows SPEC.md section 6.1: the table of contents is hashed before any value from it is
@@ -239,6 +238,8 @@ struct Listing {
 
 using Meta = std::map<std::uint16_t, std::vector<std::uint8_t>>;
 
+inline constexpr const char* kLayout = "-f2";
+
 class Archive {
 public:
     enum class Mode {
@@ -308,7 +309,8 @@ public:
     std::uint64_t file_count() const { return file_count_; }
 
     // What a package's output is named in the cache and in the library: unique for the contents.
-    std::string Key() const { return Hex(uuid_.data(), 16) + "-" + Hex(toc_sha256_.data(), 8); }
+    // The "-f2" says how the unpacking is laid out (flat); caches of an older layout are dropped (PruneCache).
+    std::string Key() const { return Hex(uuid_.data(), 16) + "-" + Hex(toc_sha256_.data(), 8) + kLayout; }
 
     // The metadata block of a package: TLV type -> payload (the first record of a type wins).
     Meta ReadMeta(const Package& package) const {
@@ -714,7 +716,7 @@ inline constexpr const char* kMarker = ".nup-complete";
 
 struct Progress {
     std::atomic<unsigned>* folders = nullptr;   // directories made
-    std::atomic<unsigned>* files = nullptr;     // files written (or skipped as unchanged)
+    std::atomic<unsigned>* files = nullptr;     // files written
     std::atomic<unsigned>* expected = nullptr;  // files in all, known once the plan is made
     const std::atomic<bool>* stop = nullptr;
 };
@@ -808,6 +810,11 @@ inline void PruneCache(const std::string& cache_root, const std::string& current
         }
         struct stat info {};
         if (stat((folder + "/" + kMarker).c_str(), &info) != 0) continue;  // not ours: left alone
+        const std::string_view layout{kLayout};
+        if (entry.name.size() < layout.size() || entry.name.compare(entry.name.size() - layout.size(), layout.size(), layout) != 0) {
+            detail::RemoveTree(folder);  // unpacked in an older layout: it cannot be used any more
+            continue;
+        }
         done.push_back({entry.name, static_cast<std::int64_t>(info.st_mtime)});
     }
     std::sort(done.begin(), done.end(), [&](const Candidate& a, const Candidate& b) {
@@ -839,64 +846,50 @@ inline std::string Materialize(const std::string& nup, const std::string& cache_
     }
     Archive archive(nup, Archive::Mode::full);  // the table of contents is verified before anything is written
 
-    // The layers, oldest first.
-    struct Layer {
-        const Package* package;
-        std::string folder;  // "base" or "updates/<version>"
-    };
-    std::vector<Layer> layers;
+    // The packages in the order they apply: the base, then each update by version.
+    std::vector<const Package*> order;
     std::vector<const Package*> updates;
     for (const Package& package : archive.packages()) {
-        if (package.kind == kBase) layers.push_back({&package, "base"});
+        if (package.kind == kBase) order.push_back(&package);
         else if (package.kind == kUpdate) updates.push_back(&package);
     }
     std::stable_sort(updates.begin(), updates.end(), [](const Package* a, const Package* b) { return a->version < b->version; });
     std::set<std::uint32_t> versions;
     for (const Package* package : updates) {
         if (!versions.insert(package->version).second) throw Error("The NUP holds two updates of the same version");
-        layers.push_back({package, "updates/" + std::to_string(package->version)});
+        order.push_back(package);
     }
-    if (layers.empty()) throw Error("The NUP holds no game or update to start");
+    if (order.empty()) throw Error("The NUP holds no game or update to start");
 
-    // The plan: what each layer writes. Only the exefs and romfs of a package count (read through its
-    // record fields, SPEC 3.1.3).
+    // The plan: one plain folder, as an ordinary extracted dump is (exefs/ and romfs/ at the root), in which
+    // every path holds the newest version of the file (an update's file replaces the base's). Nothing is
+    // written twice and the core needs no layers. Only the exefs and romfs of a package count (read through
+    // its record fields, SPEC 3.1.3).
     struct Job {
         std::string path;  // relative to the unpacking folder
         std::uint32_t file;
     };
-    std::vector<Job> jobs;
+    std::map<std::string, std::uint32_t> newest;  // path -> file record of the newest package that has it
     std::set<std::string> folders;
-    [[maybe_unused]] std::uint64_t bytes = 0;  // only the host build checks the free space
-    std::uint64_t skipped = 0;
-    std::map<std::string, std::pair<std::array<std::uint8_t, 32>, std::uint64_t>> below;  // path -> content so far
-    for (const Layer& layer : layers) {
-        for (const auto& [name, dir] : {std::pair<const char*, std::uint32_t>{"exefs", layer.package->exefs_dir},
-                                        std::pair<const char*, std::uint32_t>{"romfs", layer.package->romfs_dir}}) {
+    for (const Package* package : order) {
+        for (const auto& [name, dir] : {std::pair<const char*, std::uint32_t>{"exefs", package->exefs_dir},
+                                        std::pair<const char*, std::uint32_t>{"romfs", package->romfs_dir}}) {
             if (dir == kNoDir) continue;
-            const std::string tree = std::string{name};
-            const Listing listing = archive.List(dir, tree);
-            for (const Entry& entry : listing.files) {
-                const FileNode& node = archive.file(entry.file);
-                const auto known = below.find(entry.path);
-                if (known != below.end() && known->second.first == node.sha256 && known->second.second == node.size) {
-                    ++skipped;  // the layer below has this very file
-                    continue;
-                }
-                below[entry.path] = {node.sha256, node.size};
-                jobs.push_back({layer.folder + "/" + entry.path, entry.file});
-                bytes += node.size;
-            }
-            // Directories only of what is written here, and the empty ones of a base.
-            for (const std::string& folder : listing.dirs) folders.insert(layer.folder + "/" + folder);
+            const Listing listing = archive.List(dir, std::string{name});
+            for (const Entry& entry : listing.files) newest[entry.path] = entry.file;
+            for (const std::string& folder : listing.dirs) folders.insert(folder);
         }
     }
-    const bool has_program = std::any_of(jobs.begin(), jobs.end(), [](const Job& job) {
-        return job.path.size() >= 10 && job.path.compare(job.path.size() - 10, 10, "exefs/main") == 0 &&
-               (job.path.size() == 10 || job.path[job.path.size() - 11] == '/');
-    });
+    std::vector<Job> jobs;
+    [[maybe_unused]] std::uint64_t bytes = 0;  // only the host build checks the free space
+    for (const auto& [path, file] : newest) {
+        jobs.push_back({path, file});
+        bytes += archive.file(file).size;
+    }
+    const bool has_program = newest.count("exefs/main") != 0;
     if (!has_program) throw Error("The NUP holds no program (exefs/main)");
-    if (progress.expected) *progress.expected = static_cast<unsigned>(std::min<std::size_t>(jobs.size() + skipped, 0xFFFFFFFFu));
-    if (progress.files) *progress.files = static_cast<unsigned>(std::min<std::uint64_t>(skipped, 0xFFFFFFFFu));
+    if (progress.expected) *progress.expected = static_cast<unsigned>(std::min<std::size_t>(jobs.size(), 0xFFFFFFFFu));
+    if (progress.files) *progress.files = 0;
 #ifndef PS5_NATIVE
     // The console's free space is not known to a title (see remote/remote.cpp); a full disk shows as a write error.
     if (MakeDirs(cache_root)) {
@@ -932,6 +925,8 @@ inline std::string Materialize(const std::string& nup, const std::string& cache_
         throw;
     }
     PruneCache(cache_root, key);
+    std::fprintf(stderr, "[EglantinePS5] nup: unpacked %zu files from %zu package(s) into %s\n", jobs.size(), order.size(),
+                 finished.c_str());
     return result();
 }
 

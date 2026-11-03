@@ -65,21 +65,6 @@ void check_paths() {
             "the .nup extension");
 }
 
-// What the cache has for `path` (relative, like "romfs/a.bin") as the core sees a layer: the layer's own file, else
-// the one of the layers below (the core's layered directories).
-std::string layered_read(const fs::path& unpacked, const std::vector<std::string>& layers_newest_first,
-                         const std::string& path, bool* found) {
-    for (const std::string& layer : layers_newest_first) {
-        const fs::path candidate = unpacked / layer / path;
-        if (fs::is_regular_file(candidate)) {
-            *found = true;
-            return read_file(candidate);
-        }
-    }
-    *found = false;
-    return {};
-}
-
 void for_each_file(const fs::path& tree, const std::function<void(const std::string&, const fs::path&)>& visit) {
     if (!fs::is_directory(tree)) return;
     for (const auto& entry : fs::recursive_directory_iterator(tree))
@@ -138,59 +123,64 @@ void check_package(const fs::path& nup, const fs::path& dump) {
     require(!unpacked.empty(), "an unpacked folder with its marker");
     require(fs::path(main).string().rfind(unpacked.string(), 0) == 0, "main is inside the unpacked folder");
 
-    // -- every layer of the dump as the core sees it equals what the dump has
+    // -- the unpacked folder is the dump as its newest version has it: base files, replaced by each update's,
+    //    in version order; nothing else, nothing twice
     std::vector<std::pair<std::uint64_t, std::string>> versions;  // (version, folder) of the updates in the dump
     if (fs::is_directory(dump / "updates"))
         for (const auto& entry : fs::directory_iterator(dump / "updates"))
             if (entry.is_directory()) versions.emplace_back(std::stoull(entry.path().filename().string()), entry.path().filename().string());
     std::sort(versions.begin(), versions.end());
-    std::vector<std::string> newest_first;
-    for (auto it = versions.rbegin(); it != versions.rend(); ++it) newest_first.push_back("updates/" + it->second);
-    const bool has_base = fs::is_directory(dump / "base") || fs::exists(dump / "exefs") || fs::exists(dump / "romfs");
-    if (has_base) newest_first.push_back("base");
-
-    std::size_t compared = 0;
-    const auto compare_layer = [&](const fs::path& source, const std::string& layer, const std::vector<std::string>& visible) {
+    std::map<std::string, fs::path> expected_files;  // relative path -> file of the dump
+    const auto overlay = [&](const fs::path& source) {
         for (const char* tree : {"exefs", "romfs"})
             for_each_file(source / tree, [&](const std::string& relative, const fs::path& file) {
-                if (relative.size() > 8 && relative.compare(relative.size() - 8, 8, ".listing") == 0) return;
-                bool found = false;
-                const std::string got = layered_read(unpacked, visible, std::string{tree} + "/" + relative, &found);
-                require(found, layer + "/" + tree + "/" + relative + " is there");
-                require(got == read_file(file), layer + "/" + tree + "/" + relative + " has the dump's bytes");
-                ++compared;
+                expected_files[std::string{tree} + "/" + relative] = file;
             });
     };
-    if (fs::is_directory(dump / "base")) compare_layer(dump / "base", "base", {"base"});
-    else if (fs::exists(dump / "exefs") || fs::exists(dump / "romfs")) compare_layer(dump, "base", {"base"});
-    for (std::size_t i = 0; i < versions.size(); ++i) {
-        // What the core sees at version i: that update, then older ones, then the base.
-        std::vector<std::string> visible;
-        for (std::size_t j = i + 1; j-- > 0;) visible.push_back("updates/" + versions[j].second);
-        if (has_base) visible.push_back("base");
-        compare_layer(dump / "updates" / versions[i].second, "updates/" + versions[i].second, visible);
-    }
-    std::printf("compared %zu files with the dump\n", compared);
-    require(compared > 0, "something was compared");
+    if (fs::is_directory(dump / "base")) overlay(dump / "base");
+    else overlay(dump);  // a bare content folder
+    for (const auto& version : versions) overlay(dump / "updates" / version.second);
 
-    // Unchanged files of an update are not written twice (the core reads them from the layer below).
-    std::size_t written = 0, total = 0;
-    for_each_file(unpacked, [&](const std::string& relative, const fs::path&) {
-        if (relative != Eden::Nup::kMarker) ++written;
+    std::size_t found = 0;
+    for_each_file(unpacked, [&](const std::string& relative, const fs::path& file) {
+        if (relative == Eden::Nup::kMarker) return;
+        const auto want = expected_files.find(relative);
+        require(want != expected_files.end(), "the unpacked folder has a file the dump does not: " + relative);
+        require(read_file(file) == read_file(want->second), relative + " has the bytes of the dump's newest version");
+        ++found;
     });
-    for (const char* top : {"base", "exefs", "romfs"})  // "base", or a bare content folder
-        for_each_file(dump / top, [&](const std::string&, const fs::path&) { ++total; });
-    for (const auto& version : versions)
-        for_each_file(dump / "updates" / version.second, [&](const std::string&, const fs::path&) { ++total; });
-    std::printf("%zu files written for %zu in the dump\n", written, total);
-    require(written <= total, "no more files are written than the dump has");
+    require(found == expected_files.size(), "every file of the dump's newest version is unpacked");
+    require(!fs::exists(unpacked / "base") && !fs::exists(unpacked / "updates"), "a flat folder, no layers");
+    require(fs::path(main) == unpacked / "exefs" / "main", "the game starts from exefs/main at the root");
+    std::printf("compared %zu files with the dump's newest version\n", found);
+    require(found > 0, "something was compared");
+    require(files.load() == found, "one write for each file");
 
     // -- damaged copies are refused, and leave nothing behind
     const fs::path bad_cache = work / "bad-cache";
+    // A byte inside the data of the program the game starts from (the newest package's exefs/main), which is
+    // always unpacked: its hash (or its zstd frame) must catch it. (Data of files an update replaced is never
+    // read, so a change there is not noticed.)
+    std::uint64_t victim = 0;
+    {
+        const Eden::Nup::Archive archive(nup.string());
+        // Newest first: updates by version, then the base; the first package that has an exefs/main.
+        std::vector<const Eden::Nup::Package*> order;
+        for (const Eden::Nup::Package& package : archive.packages())
+            if (package.kind == Eden::Nup::kBase || package.kind == Eden::Nup::kUpdate) order.push_back(&package);
+        std::sort(order.begin(), order.end(), [](const auto* a, const auto* b) {
+            if ((a->kind == Eden::Nup::kUpdate) != (b->kind == Eden::Nup::kUpdate)) return a->kind == Eden::Nup::kUpdate;
+            return a->version > b->version;
+        });
+        for (const auto* package : order) {
+            if (victim != 0 || package->exefs_dir == Eden::Nup::kNoDir) continue;
+            for (const Eden::Nup::Entry& entry : archive.List(package->exefs_dir, "exefs").files)
+                if (entry.path == "exefs/main") victim = archive.file(entry.file).extent_offset + 1;
+        }
+        require(victim != 0, "the extent of exefs/main");
+    }
+    require(unpack_fails(damaged(nup, work, "blob.nup", victim), bad_cache, "damaged"), "a damaged byte of file data");
     require(unpack_fails(damaged(nup, work, "toc.nup", 0x90), bad_cache, "table of contents"), "a damaged table of contents");
-    // The first bytes of the data region belong to the first file stored: its hash (or its zstd frame) must catch it.
-    const std::uint64_t blob = Eden::Nup::Archive(nup.string()).blob_offset();
-    require(unpack_fails(damaged(nup, work, "blob.nup", blob + 1), bad_cache, "damaged"), "a damaged byte of file data");
     require(unpack_fails(damaged(nup, work, "magic.nup", 1), bad_cache, "Not a NUP"), "a damaged magic");
     {
         std::string bytes = read_file(nup);
@@ -223,21 +213,23 @@ void check_package(const fs::path& nup, const fs::path& dump) {
     // -- older unpackings are pruned: with the newest two kept, a third replaces the oldest
     {
         const fs::path pruned = work / "pruned";
-        for (const char* name : {"aaaa-1", "bbbb-2", "cccc-3"}) {
+        for (const char* name : {"aaaa-f2", "bbbb-f2", "cccc-f2"}) {
             write_file(pruned / name / Eden::Nup::kMarker, name);
             write_file(pruned / name / "base/exefs/main", "x");
         }
         write_file(pruned / "foreign" / "keep.txt", "not ours");
         write_file(pruned / "dddd-4.partial" / "half", "x");
+        write_file(pruned / "eeee-old" / Eden::Nup::kMarker, "x");  // an older layout
         struct timespec old_time[2] = {{1000, 0}, {1000, 0}};
-        utimensat(AT_FDCWD, (pruned / "aaaa-1" / Eden::Nup::kMarker).c_str(), old_time, 0);
+        utimensat(AT_FDCWD, (pruned / "aaaa-f2" / Eden::Nup::kMarker).c_str(), old_time, 0);
         struct timespec mid_time[2] = {{2000, 0}, {2000, 0}};
-        utimensat(AT_FDCWD, (pruned / "bbbb-2" / Eden::Nup::kMarker).c_str(), mid_time, 0);
-        Eden::Nup::PruneCache(pruned.string(), "cccc-3");
-        require(!fs::exists(pruned / "aaaa-1"), "the oldest unpacking is dropped");
-        require(fs::exists(pruned / "bbbb-2") && fs::exists(pruned / "cccc-3"), "the newest ones stay");
+        utimensat(AT_FDCWD, (pruned / "bbbb-f2" / Eden::Nup::kMarker).c_str(), mid_time, 0);
+        Eden::Nup::PruneCache(pruned.string(), "cccc-f2");
+        require(!fs::exists(pruned / "aaaa-f2"), "the oldest unpacking is dropped");
+        require(fs::exists(pruned / "bbbb-f2") && fs::exists(pruned / "cccc-f2"), "the newest ones stay");
         require(fs::exists(pruned / "foreign" / "keep.txt"), "a folder that is not ours is left alone");
         require(!fs::exists(pruned / "dddd-4.partial"), "a cut-off unpacking is cleared");
+        require(!fs::exists(pruned / "eeee-old"), "an unpacking of an older layout is dropped");
     }
     fs::remove_all(work);
 }

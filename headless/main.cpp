@@ -579,6 +579,7 @@ int main(int argc, char** argv) {
         if (Eden::Nup::IsNupPath(selected_game)) {
             Eden::BootTrace::Line("unpacking a NUP");
             selected_game = Eden::Nup::EnsureExtracted(selected_game, Eden::AssetsPath(".nup-cache"));
+            Eden::BootTrace::Line("NUP unpacked, starting %s", selected_game.c_str());
         }
 #ifdef EDEN_DEV_VULKAN
         Eden::Performance::vulkan_cost_enabled = std::filesystem::exists(Eden::AppFile("cost-run.txt"));
